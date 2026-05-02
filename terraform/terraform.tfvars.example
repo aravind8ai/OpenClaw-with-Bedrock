@@ -1,0 +1,18 @@
+# Copy this file to terraform.tfvars and adjust values before running terraform apply.
+
+aws_region     = "us-west-2"
+stack_name     = "openclaw-bedrock"
+openclaw_model = "global.amazon.nova-2-lite-v1:0"
+instance_type  = "c7g.large"
+
+# Optional: set to your EC2 key pair name for emergency SSH access
+key_pair_name = ""
+
+# Optional: your IP CIDR for SSH (e.g. "1.2.3.4/32"). Requires key_pair_name to be set.
+allowed_ssh_cidr = ""
+
+create_vpc_endpoints   = true
+enable_sandbox         = true
+enable_monitoring      = true
+enable_data_protection = false
+openclaw_version       = "2026.3.24"

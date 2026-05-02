@@ -1,0 +1,76 @@
+name: Terraform Apply
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'terraform/**'
+      - '.github/workflows/terraform-apply.yml'
+  workflow_dispatch:
+    inputs:
+      stack_name:
+        description: 'Stack name (resource prefix)'
+        required: false
+        default: 'openclaw-bedrock'
+      openclaw_model:
+        description: 'Bedrock model ID'
+        required: false
+        default: 'global.amazon.nova-2-lite-v1:0'
+      instance_type:
+        description: 'EC2 instance type'
+        required: false
+        default: 'c7g.large'
+
+permissions:
+  contents: read
+  id-token: write  # OIDC auth with AWS
+
+concurrency:
+  group: terraform-main
+  cancel-in-progress: false  # never cancel an in-progress apply
+
+jobs:
+  apply:
+    name: Apply
+    runs-on: ubuntu-latest
+    environment: production  # requires manual approval if configured in repo settings
+    defaults:
+      run:
+        working-directory: terraform
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-west-2' }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.5"
+
+      - name: Terraform Init
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=openclaw/terraform.tfstate" \
+            -backend-config="region=${{ vars.AWS_REGION || 'us-west-2' }}" \
+            -input=false
+
+      - name: Terraform Apply
+        run: |
+          terraform apply \
+            -var="aws_region=${{ vars.AWS_REGION || 'us-west-2' }}" \
+            -var="stack_name=${{ github.event.inputs.stack_name || vars.STACK_NAME || 'openclaw-bedrock' }}" \
+            -var="openclaw_model=${{ github.event.inputs.openclaw_model || vars.OPENCLAW_MODEL || 'global.amazon.nova-2-lite-v1:0' }}" \
+            -var="instance_type=${{ github.event.inputs.instance_type || vars.INSTANCE_TYPE || 'c7g.large' }}" \
+            -var="create_vpc_endpoints=${{ vars.CREATE_VPC_ENDPOINTS || 'true' }}" \
+            -var="enable_monitoring=${{ vars.ENABLE_MONITORING || 'true' }}" \
+            -auto-approve \
+            -input=false
+
+      - name: Show outputs
+        run: terraform output

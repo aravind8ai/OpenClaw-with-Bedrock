@@ -18,11 +18,11 @@ admin-console/node_modules/
 enterprise/admin-console/dist/
 
 # Terraform
-eks/terraform/.terraform/
-eks/terraform/*.tfstate
-eks/terraform/*.tfstate.*
-eks/terraform/*.tfvars
-!eks/terraform/*.tfvars.example
+**/.terraform/
+**/*.tfstate
+**/*.tfstate.*
+**/*.tfvars
+!**/*.tfvars.example
 eks/terraform/.terraform.lock.hcl
 
 # Demo
