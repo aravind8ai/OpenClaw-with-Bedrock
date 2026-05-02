@@ -21,6 +21,7 @@ locals {
 
   # Architecture lookup — mirrors CloudFormation ArchitectureMap
   arch_map = {
+    "t2.micro"   = "amd64"
     "t3.small"   = "amd64"
     "t3.medium"  = "amd64"
     "t3.large"   = "amd64"

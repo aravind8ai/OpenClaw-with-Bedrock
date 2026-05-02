@@ -42,11 +42,12 @@ variable "openclaw_version" {
 }
 
 variable "instance_type" {
-  description = "EC2 instance type — Graviton (ARM) recommended"
+  description = "EC2 instance type recommended"
   type        = string
-  default     = "c7g.large"
+  default     = "t3.medium"
   validation {
     condition = contains([
+      "t2.micro",
       "t4g.small", "t4g.medium", "t4g.large", "t4g.xlarge",
       "c6g.large", "c6g.xlarge", "c7g.large", "c7g.xlarge",
       "r6g.medium", "r6g.large", "r6g.xlarge",
