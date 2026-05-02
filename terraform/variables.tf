@@ -1,7 +1,11 @@
 variable "aws_region" {
   description = "AWS region to deploy into"
   type        = string
-  default     = "us-west-2"
+  default     = "us-east-1"
+  validation {
+    condition     = var.aws_region == "us-east-1"
+    error_message = "This deployment is locked to us-east-1."
+  }
 }
 
 variable "stack_name" {
@@ -44,7 +48,7 @@ variable "openclaw_version" {
 variable "instance_type" {
   description = "EC2 instance type recommended"
   type        = string
-  default     = "t3.medium"
+  default     = "t2.micro"
   validation {
     condition = contains([
       "t2.micro",

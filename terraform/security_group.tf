@@ -5,7 +5,7 @@ resource "aws_security_group" "instance" {
   description = "OpenClaw instance security group"
   vpc_id      = aws_vpc.main.id
 
-  # SSH ingress — only created when both key pair and CIDR are provided
+  # SSH ingress — only when both key pair and CIDR are provided
   dynamic "ingress" {
     for_each = (var.key_pair_name != "" && var.allowed_ssh_cidr != "") ? [1] : []
     content {
@@ -13,7 +13,7 @@ resource "aws_security_group" "instance" {
       to_port     = 22
       protocol    = "tcp"
       cidr_blocks = [var.allowed_ssh_cidr]
-      description = "SSH access (fallback)"
+      description = "SSH access (emergency fallback)"
     }
   }
 
@@ -22,7 +22,8 @@ resource "aws_security_group" "instance" {
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
+    description = "Allow all outbound"
   }
 
-  tags = { Name = "${local.name_prefix}-sg" }
+  tags = merge(local.common_tags, { Name = "${local.name_prefix}-sg" })
 }

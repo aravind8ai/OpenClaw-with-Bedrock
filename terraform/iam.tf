@@ -14,7 +14,7 @@ resource "aws_iam_role" "instance" {
     }]
   })
 
-  tags = { Name = "${local.name_prefix}-instance-role" }
+  tags = merge(local.common_tags, { Name = "${local.name_prefix}-instance-role" })
 }
 
 resource "aws_iam_role_policy_attachment" "ssm_core" {
@@ -23,6 +23,7 @@ resource "aws_iam_role_policy_attachment" "ssm_core" {
 }
 
 resource "aws_iam_role_policy_attachment" "cloudwatch_agent" {
+  count      = var.enable_monitoring ? 1 : 0
   role       = aws_iam_role.instance.name
   policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
 }
@@ -47,8 +48,9 @@ resource "aws_iam_role_policy" "bedrock" {
 }
 
 resource "aws_iam_role_policy" "bedrock_mantle" {
-  name = "BedrockMantleAccessPolicy"
-  role = aws_iam_role.instance.id
+  count = local.create_mantle_endpoint ? 1 : 0
+  name  = "BedrockMantleAccessPolicy"
+  role  = aws_iam_role.instance.id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{

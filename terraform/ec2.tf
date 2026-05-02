@@ -1,6 +1,6 @@
 # ==================== AMI Lookup ====================
-# Resolves the latest Ubuntu 24.04 AMI for the given architecture,
-# matching the CloudFormation SSM parameter lookup.
+# Resolves the latest Ubuntu 24.04 AMI for the target architecture dynamically.
+# This avoids hardcoded AMI IDs that are region-specific and go stale.
 
 data "aws_ssm_parameter" "ubuntu_ami" {
   name = "/aws/service/canonical/ubuntu/server/24.04/stable/current/${local.instance_arch}/hvm/ebs-gp3/ami-id"
@@ -34,12 +34,11 @@ resource "aws_instance" "main" {
 
   user_data = local.user_data
 
-  tags = {
+  tags = merge(local.common_tags, {
     Name                  = "${local.name_prefix}-instance"
     "openclaw:stack-name" = local.name_prefix
-  }
+  })
 
-  # Ensure IAM profile and network are ready before the instance launches
   depends_on = [
     aws_iam_instance_profile.instance,
     aws_internet_gateway.main,
@@ -59,10 +58,8 @@ resource "aws_cloudwatch_metric_alarm" "auto_recovery" {
   evaluation_periods  = 2
   threshold           = 1
   comparison_operator = "GreaterThanOrEqualToThreshold"
-
-  dimensions = { InstanceId = aws_instance.main.id }
-
-  alarm_actions = ["arn:aws:automate:${var.aws_region}:ec2:recover"]
+  dimensions          = { InstanceId = aws_instance.main.id }
+  alarm_actions       = ["arn:aws:automate:${var.aws_region}:ec2:recover"]
 }
 
 resource "aws_cloudwatch_metric_alarm" "instance_status" {
@@ -76,8 +73,6 @@ resource "aws_cloudwatch_metric_alarm" "instance_status" {
   evaluation_periods  = 3
   threshold           = 1
   comparison_operator = "GreaterThanOrEqualToThreshold"
-
-  dimensions = { InstanceId = aws_instance.main.id }
-
-  alarm_actions = ["arn:aws:automate:${var.aws_region}:ec2:reboot"]
+  dimensions          = { InstanceId = aws_instance.main.id }
+  alarm_actions       = ["arn:aws:automate:${var.aws_region}:ec2:reboot"]
 }

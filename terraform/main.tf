@@ -13,39 +13,21 @@ terraform {
 }
 
 provider "aws" {
-  region = var.aws_region
+  region = "us-east-1"
 }
 
 locals {
   name_prefix = var.stack_name
 
-  # Architecture lookup — mirrors CloudFormation ArchitectureMap
-  arch_map = {
-    "t2.micro"   = "amd64"
-    "t3.small"   = "amd64"
-    "t3.medium"  = "amd64"
-    "t3.large"   = "amd64"
-    "t3.xlarge"  = "amd64"
-    "c5.xlarge"  = "amd64"
-    "r5.large"   = "amd64"
-    "r5.xlarge"  = "amd64"
-    "t4g.small"  = "arm64"
-    "t4g.medium" = "arm64"
-    "t4g.large"  = "arm64"
-    "t4g.xlarge" = "arm64"
-    "c6g.large"  = "arm64"
-    "c6g.xlarge" = "arm64"
-    "c7g.large"  = "arm64"
-    "c7g.xlarge" = "arm64"
-    "r6g.medium" = "arm64"
-    "r6g.large"  = "arm64"
-    "r6g.xlarge" = "arm64"
-    "r7g.medium" = "arm64"
-    "r7g.large"  = "arm64"
-    "r7g.xlarge" = "arm64"
+  # Common tags applied to all resources
+  common_tags = {
+    Project   = "openclaw"
+    StackName = local.name_prefix
+    ManagedBy = "terraform"
   }
 
-  instance_arch = local.arch_map[var.instance_type]
+  # Architecture lookup by instance family prefix
+  instance_arch = can(regex("^(t4g|c6g|c7g|r6g|r7g)", var.instance_type)) ? "arm64" : "amd64"
 
   # Bedrock Mantle supported regions
   mantle_regions = toset([
@@ -55,4 +37,12 @@ locals {
     "eu-south-1", "eu-north-1", "sa-east-1",
   ])
   create_mantle_endpoint = var.create_vpc_endpoints && contains(local.mantle_regions, var.aws_region)
+
+  # Interface VPC endpoints to create (excluding bedrock-mantle which is region-conditional)
+  vpc_endpoint_services = var.create_vpc_endpoints ? toset([
+    "bedrock-runtime",
+    "ssm",
+    "ssmmessages",
+    "ec2messages",
+  ]) : toset([])
 }

@@ -5,13 +5,7 @@ resource "aws_ebs_volume" "data" {
   size              = 30
   type              = "gp3"
   encrypted         = true
-
-  # When data protection is enabled, prevent destroy from removing the volume
-  lifecycle {
-    prevent_destroy = false # set via var — see null_resource below
-  }
-
-  tags = { Name = "${local.name_prefix}-data" }
+  tags              = merge(local.common_tags, { Name = "${local.name_prefix}-data" })
 }
 
 resource "aws_volume_attachment" "data" {

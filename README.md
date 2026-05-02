@@ -139,7 +139,7 @@ Merge to main
 | `AWS_REGION` | Variable | Deployment region (default: `us-east-1`) |
 | `STACK_NAME` | Variable | Resource name prefix (default: `chatbot-stack`) |
 | `OPENCLAW_MODEL` | Variable | Bedrock model ID (default: `global.amazon.nova-2-lite-v1:0`) |
-| `INSTANCE_TYPE` | Variable | EC2 instance type (default: `c7g.large`) |
+| `INSTANCE_TYPE` | Variable | EC2 instance type (default: `t2.micro`) |
 | `CREATE_VPC_ENDPOINTS` | Variable | `true` / `false` (default: `true`) |
 | `ENABLE_MONITORING` | Variable | `true` / `false` (default: `true`) |
 | `BEDROCK_AGENT_ALIAS` | Variable | Agent alias name (default: `Chatbot_Agent`) |
@@ -299,7 +299,7 @@ Switch models by updating the `OPENCLAW_MODEL` variable and re-running the pipel
 | `stack_name` | `openclaw-bedrock` | Prefix for all resource names |
 | `openclaw_model` | Nova 2 Lite | Bedrock model ID |
 | `openclaw_version` | `2026.3.24` | OpenClaw version to install |
-| `instance_type` | `c7g.large` | EC2 instance type |
+| `instance_type` | `t2.micro` | EC2 instance type (free tier eligible; upgrade for production) |
 | `key_pair_name` | _(empty)_ | EC2 key pair for emergency SSH |
 | `allowed_ssh_cidr` | _(empty)_ | CIDR for SSH — leave empty to disable |
 | `create_vpc_endpoints` | `true` | Private Bedrock + SSM networking |

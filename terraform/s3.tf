@@ -9,7 +9,7 @@ resource "random_id" "bucket_suffix" {
 resource "aws_s3_bucket" "scripts" {
   bucket        = "${local.name_prefix}-scripts-${random_id.bucket_suffix.hex}"
   force_destroy = true
-  tags          = { Name = "${local.name_prefix}-scripts" }
+  tags          = merge(local.common_tags, { Name = "${local.name_prefix}-scripts" })
 }
 
 resource "aws_s3_bucket_public_access_block" "scripts" {
@@ -36,7 +36,6 @@ resource "aws_s3_object" "setup_script" {
   etag    = md5(local.setup_script)
 }
 
-# Allow the instance role to read from this bucket
 resource "aws_iam_role_policy" "s3_scripts" {
   name = "S3ScriptsPolicy"
   role = aws_iam_role.instance.id
