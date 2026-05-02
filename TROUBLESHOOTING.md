@@ -5,21 +5,23 @@
 ### Connect to EC2 Instance
 
 ```bash
-# Get instance ID from CloudFormation
-INSTANCE_ID=$(aws cloudformation describe-stacks \
-  --stack-name openclaw-bedrock \
-  --query 'Stacks[0].Outputs[?OutputKey==`InstanceId`].OutputValue' \
-  --output text \
-  --region us-west-2)
+# Get instance ID from Terraform output
+INSTANCE_ID=$(terraform -chdir=terraform output -raw instance_id)
 
-# Connect via SSM
-aws ssm start-session --target $INSTANCE_ID --region us-west-2
+# Or look it up directly
+INSTANCE_ID=$(aws ec2 describe-instances \
+  --filters "Name=tag:Name,Values=<stack-name>-instance" \
+  --query 'Reservations[0].Instances[0].InstanceId' \
+  --output text --region us-east-1)
+
+# Connect via SSM (no SSH needed)
+aws ssm start-session --target $INSTANCE_ID --region us-east-1
 
 # Switch to ubuntu user
 sudo su - ubuntu
 ```
 
-### openclaw Common Commands
+### OpenClaw Common Commands
 
 ```bash
 # Check gateway status
@@ -37,9 +39,6 @@ XDG_RUNTIME_DIR=/run/user/1000 journalctl --user -u openclaw-gateway.service -n 
 # Check configuration
 cat ~/.openclaw/openclaw.json | python3 -m json.tool
 
-# Get gateway token from SSM Parameter Store
-bash ~/ssm-portforward.sh
-
 # Test Bedrock connection
 REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
 aws bedrock-runtime invoke-model \
@@ -51,13 +50,11 @@ aws bedrock-runtime invoke-model \
 
 ### View Setup Logs
 
-If deployment fails or openclaw isn't working, check the setup logs on the instance:
-
 ```bash
 # Last 100 lines of setup log
 sudo tail -100 /var/log/openclaw-setup.log
 
-# Follow setup log in real time (if still running)
+# Follow in real time (if still running)
 sudo tail -f /var/log/openclaw-setup.log
 
 # Full cloud-init log
@@ -68,187 +65,149 @@ sudo cat /var/log/cloud-init-output.log
 
 ## Common Issues
 
-### 1. "No API key found for amazon-bedrock" After Upgrade
+### 1. "No API key found for amazon-bedrock"
 
-**Symptom**: After upgrading OpenClaw (or deploying with version `2026.4.5` / `latest`), the agent fails with:
+**Symptom**: Agent fails with:
 ```
 ⚠ Agent failed before reply: No API key found for amazon-bedrock.
 Use /login or set an API key environment variable.
 ```
 
-**Cause**: OpenClaw 2026.4.5+ switched its model engine to `pi-coding-agent`, which no longer reads `"auth": "aws-sdk"` from the config file. It requires the `AWS_PROFILE` environment variable to discover IAM credentials from the EC2 instance profile (IMDS). The gateway systemd service does not inherit shell environment variables, so `AWS_PROFILE` is missing at runtime.
+**Cause**: OpenClaw 2026.4.5+ requires `AWS_PROFILE` env var to discover IAM credentials from the EC2 instance profile. The gateway systemd service doesn't inherit shell env vars, so it's missing at runtime.
 
-**Fix** (one command, no restart of EC2 needed):
+**Fix**:
 
 ```bash
 # SSM into the instance, switch to ubuntu
 sudo -u ubuntu bash
 
-# Write AWS_PROFILE to the durable .env file (survives gateway reinstalls)
+# Write AWS_PROFILE to the durable .env file
 echo "AWS_PROFILE=default" >> ~/.openclaw/.env
 
-# Restart gateway to pick up the change
+# Restart gateway
 systemctl --user restart openclaw-gateway.service
 ```
 
-> **Why this works**: `~/.openclaw/.env` is loaded by the gateway systemd service via `EnvironmentFile=`. Setting `AWS_PROFILE=default` tells the AWS SDK to resolve credentials from IMDS (EC2 instance profile), which is how Bedrock authentication works on EC2. This file is **not** overwritten by `openclaw gateway install --force` or upgrades.
-
-> **New deployments**: Templates updated after April 2026 write this file automatically during setup. Only existing deployments that upgrade in-place need this manual step.
+> `~/.openclaw/.env` is loaded by the gateway systemd service via `EnvironmentFile=` and survives upgrades.
 
 ---
 
 ### 2. Cannot Connect via SSM
 
-**Symptom**: `TargetNotConnected` or timeout when running `aws ssm start-session`
+**Symptom**: `TargetNotConnected` or timeout on `aws ssm start-session`
 
-**Causes**:
-- SSM agent not running
-- IAM role missing permissions
-- Security group blocking traffic
-
-**Solutions**:
+**Causes**: SSM agent not running, IAM role missing permissions, or security group blocking outbound 443.
 
 ```bash
-# Check SSM agent status
+# Check if instance is registered with SSM
 aws ssm describe-instance-information \
   --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
-  --region us-west-2
+  --region us-east-1
 
-# Check IAM role
+# Verify IAM instance profile is attached
 aws ec2 describe-instances \
   --instance-ids $INSTANCE_ID \
   --query 'Reservations[0].Instances[0].IamInstanceProfile' \
-  --region us-west-2
+  --region us-east-1
 
-# Restart SSM agent (if you have SSH access)
-ssh -i openclaw-key.pem ubuntu@<instance-ip>
+# If you have SSH access, restart SSM agent
 sudo snap restart amazon-ssm-agent
 ```
+
+---
 
 ### 3. Web UI Shows "Disconnected" or Token Mismatch
 
 **Symptom**: Browser shows "Disconnected from gateway" or "unauthorized: gateway token mismatch"
 
-**Causes**:
-- Port forwarding not running
-- Wrong token in URL
-- Browser cached old token
-- Gateway service not running
-
-**Solutions**:
-
 ```bash
-# 1. Verify port forwarding is running (on local computer)
+# 1. Check port forwarding is running (local machine)
 ps aux | grep "start-session.*18789"
 
-# 2. Restart port forwarding if needed
+# 2. Restart port forwarding
 aws ssm start-session \
   --target $INSTANCE_ID \
-  --region us-west-2 \
+  --region us-east-1 \
   --document-name AWS-StartPortForwardingSession \
   --parameters '{"portNumber":["18789"],"localPortNumber":["18789"]}'
 
-# 3. Get correct token (on EC2, via SSM Parameter Store)
-bash ~/ssm-portforward.sh
+# 3. Get the correct token from SSM Parameter Store
+TOKEN=$(aws ssm get-parameter \
+  --name /openclaw/<stack-name>/gateway-token \
+  --with-decryption \
+  --query Parameter.Value \
+  --output text --region us-east-1)
+echo "http://localhost:18789/?token=$TOKEN"
 
-# 4. Clear browser cache
-# Chrome: Cmd+Shift+Delete (Mac) or Ctrl+Shift+Delete (Windows)
-# Firefox: Cmd+Shift+P (Mac) or Ctrl+Shift+P (Windows) for private window
+# 4. Check gateway is running (on EC2)
+XDG_RUNTIME_DIR=/run/user/1000 systemctl --user status openclaw-gateway.service
 
-# 5. Check if Gateway is running (on EC2)
-ps aux | grep clawdbot
-XDG_RUNTIME_DIR=/run/user/1000 systemctl --user status clawdbot-gateway
-
-# 6. Restart Gateway if needed
-XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart clawdbot-gateway
+# 5. Restart if needed
+XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart openclaw-gateway.service
 ```
+
+---
 
 ### 4. Model Returns Empty Response
 
-**Symptom**: Send message in Web Chat, no response or empty response
-
-**Causes**:
-- Model not enabled in Bedrock
-- Wrong model ID in configuration
-- IAM permissions missing
-- Model ID without CRIS prefix (us./global./etc.)
-
-**Solutions**:
+**Symptom**: Message sent, no response or empty response in Web UI
 
 ```bash
-# 1. Check current model configuration
-cat ~/.clawdbot/clawdbot.json | grep -A 5 '"id"'
+# 1. Check current model config
+cat ~/.openclaw/openclaw.json | python3 -m json.tool | grep -A 5 '"model"'
 
-# 2. Verify model is available
+# 2. Test model directly
 REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
-aws bedrock list-foundation-models \
-  --by-provider Amazon \
-  --region $REGION \
-  --query 'modelSummaries[?modelId==`global.amazon.nova-2-lite-v1:0`].[modelId,modelLifecycle.status]' \
-  --output table
-
-# 3. Test model directly
 aws bedrock-runtime invoke-model \
   --model-id global.amazon.nova-2-lite-v1:0 \
   --body '{"messages":[{"role":"user","content":[{"text":"Hello"}]}],"inferenceConfig":{"maxTokens":100}}' \
   --region $REGION \
-  /tmp/test.json
+  /tmp/test.json && cat /tmp/test.json
 
-cat /tmp/test.json
+# 3. Check gateway logs for errors
+XDG_RUNTIME_DIR=/run/user/1000 journalctl --user -u openclaw-gateway.service -n 50 | grep -i error
 
-# 4. Check Gateway logs for errors
-XDG_RUNTIME_DIR=/run/user/1000 journalctl --user -u clawdbot-gateway -n 50 | grep -i error
-
-# 5. Verify model ID has CRIS prefix
-# ✅ Good: global.amazon.nova-2-lite-v1:0
-# ✅ Good: us.amazon.nova-pro-v1:0
-# ❌ Bad: amazon.nova-2-lite-v1:0 (no prefix)
+# 4. Verify model ID has cross-region inference prefix
+# ✅ global.amazon.nova-2-lite-v1:0
+# ✅ us.amazon.nova-pro-v1:0
+# ❌ amazon.nova-2-lite-v1:0  (missing prefix)
 ```
+
+---
 
 ### 5. Bedrock API Errors
 
 **Symptom**: `AccessDeniedException`, `ThrottlingException`, or `ModelNotFound`
 
-**Solutions**:
-
 ```bash
-# Check IAM permissions
+# Verify IAM identity
 aws sts get-caller-identity
 
-# Test Bedrock access
-aws bedrock list-foundation-models --region us-west-2
-
-# Check if model is enabled
+# List available models
 aws bedrock list-foundation-models \
   --by-provider Amazon \
-  --region us-west-2 \
+  --region us-east-1 \
   --query 'modelSummaries[?contains(modelId, `nova`)].[modelId,modelLifecycle.status]' \
   --output table
 
-# View Clawdbot logs
-tail -f /tmp/clawdbot/clawdbot-$(date +%Y-%m-%d).log
+# View gateway logs
+XDG_RUNTIME_DIR=/run/user/1000 journalctl --user -u openclaw-gateway.service -n 50
 ```
+
+---
 
 ### 6. High Costs / Unexpected Bills
 
-**Symptom**: Bedrock costs higher than expected
-
-**Solutions**:
-
 ```bash
-# 1. Check current usage
+# Check Bedrock costs (last 7 days)
 aws ce get-cost-and-usage \
-  --time-period Start=2026-01-01,End=2026-01-31 \
+  --time-period Start=$(date -d '7 days ago' +%Y-%m-%d),End=$(date +%Y-%m-%d) \
   --granularity DAILY \
   --metrics BlendedCost \
   --filter '{"Dimensions":{"Key":"SERVICE","Values":["Amazon Bedrock"]}}' \
-  --region us-west-2
+  --region us-east-1
 
-# 2. Switch to cheaper model
-# Edit ~/.clawdbot/clawdbot.json
-# Change model to: global.amazon.nova-2-lite-v1:0 (90% cheaper than Claude)
-
-# 3. Set up cost alerts
+# Set up a cost alert
 aws cloudwatch put-metric-alarm \
   --alarm-name bedrock-cost-alert \
   --alarm-description "Alert when Bedrock costs exceed $50" \
@@ -259,464 +218,227 @@ aws cloudwatch put-metric-alarm \
   --evaluation-periods 1 \
   --threshold 50 \
   --comparison-operator GreaterThanThreshold
-
-# 4. Check for runaway loops
-XDG_RUNTIME_DIR=/run/user/1000 journalctl --user -u clawdbot-gateway | grep -i "invoke"
 ```
+
+Switch to a cheaper model by updating `OPENCLAW_MODEL` in GitHub Variables and re-running the pipeline. Nova 2 Lite is 90% cheaper than Claude.
+
+---
 
 ### 7. Gateway Won't Start
 
-**Symptom**: `systemctl --user status clawdbot-gateway` shows failed
-
-**Solutions**:
+**Symptom**: `systemctl --user status openclaw-gateway.service` shows failed
 
 ```bash
-# 1. Check logs
-XDG_RUNTIME_DIR=/run/user/1000 journalctl --user -u clawdbot-gateway -n 100
+# Check logs
+XDG_RUNTIME_DIR=/run/user/1000 journalctl --user -u openclaw-gateway.service -n 100
 
-# 2. Verify configuration is valid JSON
-python3 -m json.tool ~/.clawdbot/clawdbot.json
+# Validate config JSON
+python3 -m json.tool ~/.openclaw/openclaw.json
 
-# 3. Check if port is already in use
-netstat -tlnp | grep 18789
-# or
+# Check if port is already in use
 ss -tlnp | grep 18789
 
-# 4. Kill existing process
-pkill -f clawdbot
+# Kill any stale process
+pkill -f openclaw
 
-# 5. Restart service
-XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart clawdbot-gateway
+# Restart
+XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart openclaw-gateway.service
 
-# 6. If systemctl doesn't work, start manually
-nohup clawdbot gateway start > /tmp/gateway.log 2>&1 &
+# If systemctl fails, start manually
+nohup openclaw gateway start > /tmp/gateway.log 2>&1 &
 tail -f /tmp/gateway.log
 ```
+
+---
 
 ### 8. Port Forwarding Fails
 
 **Symptom**: `Connection to destination port failed`
 
-**Causes**:
-- Gateway not running on EC2
-- Port 18789 not listening
-- SSM agent issues
-
-**Solutions**:
-
 ```bash
-# 1. Verify Gateway is running (on EC2)
-ps aux | grep clawdbot
-netstat -tlnp | grep 18789
-
-# 2. Check Gateway logs
-tail -f /tmp/clawdbot/clawdbot-$(date +%Y-%m-%d).log
-
-# 3. Restart Gateway
-XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart clawdbot-gateway
-sleep 5
-
-# 4. Verify port is listening
+# Verify gateway is listening on EC2
 ss -tlnp | grep 18789
 
-# 5. Restart port forwarding (on local computer)
-# Kill old session
+# Restart gateway
+XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart openclaw-gateway.service
+sleep 5
+ss -tlnp | grep 18789
+
+# Kill old port forwarding session (local machine)
 pkill -f "start-session.*18789"
 
-# Start new session
+# Start fresh
 aws ssm start-session \
   --target $INSTANCE_ID \
-  --region us-west-2 \
+  --region us-east-1 \
   --document-name AWS-StartPortForwardingSession \
   --parameters '{"portNumber":["18789"],"localPortNumber":["18789"]}'
 ```
 
+---
+
 ### 9. Slow Response Times
 
-**Symptom**: openclaw takes long time to respond
-
-**Solutions**:
-
 ```bash
-# 1. Check instance CPU/memory
+# Check instance load
 top
-htop
 
-# 2. Upgrade instance type
-# Update CloudFormation with larger instance (c7g.xlarge)
-
-# 3. Switch to faster model
-# Nova 2 Lite → Nova Pro (faster, slightly more expensive)
-# Edit ~/.clawdbot/clawdbot.json
-
-# 4. Check network latency
+# Check network latency to Bedrock
+REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
 ping bedrock-runtime.$REGION.amazonaws.com
-
-# 5. Enable VPC endpoints if not already
-# Reduces latency by keeping traffic in AWS network
 ```
 
-### 10. Cannot Install Channels (WhatsApp/Telegram)
+To upgrade instance type, update `INSTANCE_TYPE` in GitHub Variables and re-run the pipeline (`terraform-apply.yml`). Recommended upgrade: `c7g.large` → `c7g.xlarge`.
 
-**Symptom**: Error when adding channel in Web UI
+Enabling VPC endpoints (`CREATE_VPC_ENDPOINTS=true`) also reduces latency by keeping Bedrock traffic on the AWS private network.
 
-**Solutions**:
+---
+
+### 10. Cannot Add Messaging Channels
+
+**Symptom**: Error when adding WhatsApp/Telegram/Discord in Web UI
 
 ```bash
-# 1. Check openclaw version
-clawdbot --version
+# Check openclaw version
+openclaw --version
 
-# 2. Update to latest
-npm update -g clawdbot
-XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart clawdbot-gateway
+# Update to latest
+npm update -g openclaw
+XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart openclaw-gateway.service
 
-# 3. Check logs for specific error
-XDG_RUNTIME_DIR=/run/user/1000 journalctl --user -u clawdbot-gateway -f
-
-# 4. For WhatsApp, ensure you're using correct pairing mode
-# Check ~/.clawdbot/clawdbot.json for "dmPolicy": "pairing"
+# Watch logs while adding channel
+XDG_RUNTIME_DIR=/run/user/1000 journalctl --user -u openclaw-gateway.service -f
 ```
 
-### 11. AWS CLI "text contents could not be decoded" Error
+---
 
-**Symptom**: When running `aws cloudformation create-stack --template-body file://clawdbot-bedrock.yaml`, you get:
-```
-An error occurred (ValidationError) when calling the CreateStack operation: 
-Template format error: YAML not well-formed. text contents could not be decoded
-```
+### 11. Terraform Deployment Fails
 
-**Cause**: The YAML file is not encoded in UTF-8, or contains a BOM (Byte Order Mark) that AWS CLI cannot decode.
-
-**Solutions**:
+**Symptom**: GitHub Actions pipeline fails during apply
 
 ```bash
-# Option 1: Convert file to UTF-8 (Linux/Mac)
-iconv -f UTF-16 -t UTF-8 clawdbot-bedrock.yaml > clawdbot-bedrock-utf8.yaml
-aws cloudformation create-stack --template-body file://clawdbot-bedrock-utf8.yaml ...
-
-# Option 2: Remove BOM if present
-sed '1s/^\xEF\xBB\xBF//' clawdbot-bedrock.yaml > clawdbot-bedrock-clean.yaml
-
-# Option 3: Re-download from GitHub (ensures UTF-8)
-curl -O https://raw.githubusercontent.com/aws-samples/sample-Moltbot-on-AWS-with-Bedrock/main/clawdbot-bedrock.yaml
-
-# Option 4: Use text editor to save as UTF-8
-# - VS Code: Click encoding in status bar → "Save with Encoding" → UTF-8
-# - Notepad++: Encoding → Convert to UTF-8 (without BOM)
-# - Sublime: File → Save with Encoding → UTF-8
-
-# Verify encoding
-file -I clawdbot-bedrock.yaml
-# Should show: text/plain; charset=utf-8
-```
-
-**Prevention**: Always clone the repository using Git, which preserves file encoding:
-```bash
-git clone https://github.com/aws-samples/sample-Moltbot-on-AWS-with-Bedrock.git
-```
-
-### 12. CloudFormation Stack Fails
-
-**Symptom**: Stack creation fails or rolls back
-
-**Common Causes**:
-
-**a) Key pair not found**
-```bash
-# Create key pair in the region
-aws ec2 create-key-pair \
-  --key-name openclaw-key \
-  --region us-west-2 \
-  --query 'KeyMaterial' \
-  --output text > openclaw-key.pem
-```
-
-**b) Insufficient permissions**
-```bash
-# Verify you have CloudFormation permissions
-aws cloudformation describe-stacks --region us-west-2
-```
-
-**c) Resource limits**
-```bash
-# Check VPC limits
-aws ec2 describe-account-attributes \
-  --attribute-names max-instances \
-  --region us-west-2
-```
-
-**View failure reason**:
-```bash
+# Check failed resources in AWS console, or via CLI
 aws cloudformation describe-stack-events \
-  --stack-name openclaw-bedrock \
-  --region us-west-2 \
+  --stack-name <stack-name> --region us-east-1 \
   --query 'StackEvents[?ResourceStatus==`CREATE_FAILED`]'
+
+# Common causes:
+# - Missing GitHub secret (AWS_ROLE_ARN, TF_STATE_BUCKET, TF_LOCK_TABLE)
+# - IAM role doesn't have sufficient permissions
+# - S3 state bucket doesn't exist in the target region
+# - DynamoDB lock table doesn't exist
 ```
 
-## Diagnostic Scripts
+To destroy a failed stack and retry:
+```bash
+# Trigger terraform-destroy.yml workflow from GitHub Actions
+# Type "destroy" in the confirm input, then re-run terraform-apply.yml
+```
 
-### Complete Health Check
+---
+
+## Diagnostic Script
+
+Run this on the EC2 instance for a full health snapshot:
 
 ```bash
 #!/bin/bash
-# Save as diagnose.sh and run on EC2 instance
+REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
+INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id)
 
-echo "=== openclaw Health Check ==="
+echo "=== OpenClaw Health Check ==="
+echo "Region: $REGION | Instance: $INSTANCE_ID"
 echo ""
 
-echo "1. Service Status:"
-XDG_RUNTIME_DIR=/run/user/1000 systemctl --user status clawdbot-gateway --no-pager
+echo "--- Service Status ---"
+XDG_RUNTIME_DIR=/run/user/1000 systemctl --user status openclaw-gateway.service --no-pager
 echo ""
 
-echo "2. Process:"
-ps aux | grep clawdbot | grep -v grep
-echo ""
-
-echo "3. Port Listening:"
+echo "--- Port 18789 ---"
 ss -tlnp | grep 18789
 echo ""
 
-echo "4. Configuration:"
-cat ~/.clawdbot/clawdbot.json | python3 -m json.tool | grep -A 10 '"gateway"'
+echo "--- Recent Logs ---"
+XDG_RUNTIME_DIR=/run/user/1000 journalctl --user -u openclaw-gateway.service -n 20 --no-pager
 echo ""
 
-echo "5. Model Configuration:"
-cat ~/.clawdbot/clawdbot.json | python3 -m json.tool | grep -A 5 '"models"'
-echo ""
-
-echo "6. Recent Logs:"
-XDG_RUNTIME_DIR=/run/user/1000 journalctl --user -u clawdbot-gateway -n 20 --no-pager
-echo ""
-
-echo "7. Bedrock Test:"
-REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
+echo "--- Bedrock Test ---"
 aws bedrock-runtime invoke-model \
   --model-id global.amazon.nova-2-lite-v1:0 \
-  --body '{"messages":[{"role":"user","content":[{"text":"test"}]}],"inferenceConfig":{"maxTokens":10}}' \
-  --region $REGION \
-  /tmp/test.json && echo "✓ Bedrock OK" || echo "✗ Bedrock Failed"
+  --body '{"messages":[{"role":"user","content":[{"text":"ping"}]}],"inferenceConfig":{"maxTokens":10}}' \
+  --region $REGION /tmp/test.json \
+  && echo "✓ Bedrock OK" || echo "✗ Bedrock Failed"
 ```
 
-### Reset Configuration
+---
+
+## Reset Configuration
+
+Use this if the config is corrupted:
 
 ```bash
 #!/bin/bash
-# Complete reset if configuration is corrupted
-
-echo "=== Resetting openclaw Configuration ==="
-
-# Stop service
-XDG_RUNTIME_DIR=/run/user/1000 systemctl --user stop clawdbot-gateway
-
-# Backup old config
-cp ~/.clawdbot/clawdbot.json ~/.clawdbot/clawdbot.json.backup.$(date +%s)
-
-# Get current values (token from SSM Parameter Store)
-IMDS_TOKEN=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
-INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
-STACK_NAME=$(aws ec2 describe-tags --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=aws:cloudformation:stack-name" --query "Tags[0].Value" --output text --region $REGION)
-TOKEN=$(aws ssm get-parameter --name "/openclaw/$STACK_NAME/gateway-token" --with-decryption --query Parameter.Value --output text --region $REGION)
 REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
+IMDS_TOKEN=$(curl -s -X PUT http://169.254.169.254/latest/api/token \
+  -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+  http://169.254.169.254/latest/meta-data/instance-id)
+STACK_NAME=$(aws ec2 describe-tags \
+  --filters "Name=resource-id,Values=$INSTANCE_ID" "Name=key,Values=openclaw:stack-name" \
+  --query "Tags[0].Value" --output text --region $REGION)
+TOKEN=$(aws ssm get-parameter \
+  --name "/openclaw/$STACK_NAME/gateway-token" \
+  --with-decryption --query Parameter.Value --output text --region $REGION)
+
+# Stop and backup
+XDG_RUNTIME_DIR=/run/user/1000 systemctl --user stop openclaw-gateway.service
+cp ~/.openclaw/openclaw.json ~/.openclaw/openclaw.json.bak.$(date +%s)
 
 # Recreate config
-cat > ~/.clawdbot/clawdbot.json << EOF
+cat > ~/.openclaw/openclaw.json << EOF
 {
   "gateway": {
     "mode": "local",
     "port": 18789,
     "bind": "loopback",
-    "controlUi": {
-      "enabled": true,
-      "allowInsecureAuth": true
-    },
-    "auth": {
-      "mode": "token",
-      "token": "$TOKEN"
-    }
+    "controlUi": { "enabled": true, "allowInsecureAuth": true },
+    "auth": { "mode": "token", "token": "$TOKEN" }
   },
-  "models": {
-    "providers": {
-      "amazon-bedrock": {
-        "baseUrl": "https://bedrock-runtime.$REGION.amazonaws.com",
-        "api": "bedrock-converse-stream",
-        "auth": "aws-sdk",
-        "models": [
-          {
-            "id": "global.amazon.nova-2-lite-v1:0",
-            "name": "Nova 2 Lite",
-            "input": ["text", "image", "video"],
-            "contextWindow": 1000000,
-            "maxTokens": 8192
-          }
-        ]
-      }
-    }
+  "plugins": {
+    "entries": { "amazon-bedrock": { "enabled": true } }
   },
   "agents": {
     "defaults": {
-      "model": {
-        "primary": "amazon-bedrock/global.amazon.nova-2-lite-v1:0"
-      }
+      "model": { "primary": "amazon-bedrock/global.amazon.nova-2-lite-v1:0" }
     }
   }
 }
 EOF
 
-# Restore .env for Bedrock IAM auth (required for OpenClaw 2026.4.5+)
-# See: https://docs.openclaw.ai/providers/bedrock (EC2 Instance Roles)
-printf 'AWS_PROFILE=default\nAWS_REGION=%s\nAWS_DEFAULT_REGION=%s\n' "$REGION" "$REGION" > ~/.openclaw/.env
+# Restore env
+printf 'AWS_PROFILE=default\nAWS_REGION=%s\nAWS_DEFAULT_REGION=%s\n' \
+  "$REGION" "$REGION" > ~/.openclaw/.env
 
-# Restart service
-XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart clawdbot-gateway
-
-echo "✓ Configuration reset complete"
-echo "Access URL: http://localhost:18789/?token=$TOKEN"
+XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart openclaw-gateway.service
+echo "✓ Done — http://localhost:18789/?token=$TOKEN"
 ```
 
-## Performance Optimization
+---
 
-### Upgrade to Faster Model
-
-```bash
-# Edit config
-nano ~/.clawdbot/clawdbot.json
-
-# Change model ID to:
-# - us.amazon.nova-pro-v1:0 (faster, multimodal)
-# - global.anthropic.claude-sonnet-4-5-20250929-v1:0 (fastest, most capable)
-
-# Also update agents.defaults.model.primary
-
-# Restart
-XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart clawdbot-gateway
-```
-
-### Upgrade Instance Type
-
-```bash
-# Update CloudFormation stack
-aws cloudformation update-stack \
-  --stack-name openclaw-bedrock \
-  --use-previous-template \
-  --parameters \
-    ParameterKey=InstanceType,ParameterValue=c7g.xlarge \
-    ParameterKey=KeyPairName,UsePreviousValue=true \
-    ParameterKey=OpenClawModel,UsePreviousValue=true \
-  --capabilities CAPABILITY_IAM \
-  --region us-west-2
-```
-
-## Monitoring
-
-### CloudWatch Metrics
-
-```bash
-# View EC2 CPU utilization
-aws cloudwatch get-metric-statistics \
-  --namespace AWS/EC2 \
-  --metric-name CPUUtilization \
-  --dimensions Name=InstanceId,Value=$INSTANCE_ID \
-  --start-time $(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S) \
-  --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
-  --period 300 \
-  --statistics Average \
-  --region us-west-2
-```
-
-### Cost Monitoring
-
-```bash
-# View Bedrock costs (last 7 days)
-aws ce get-cost-and-usage \
-  --time-period Start=$(date -d '7 days ago' +%Y-%m-%d),End=$(date +%Y-%m-%d) \
-  --granularity DAILY \
-  --metrics BlendedCost \
-  --filter '{"Dimensions":{"Key":"SERVICE","Values":["Amazon Bedrock"]}}' \
-  --region us-west-2
-```
-
-## Getting Help
-
-### Collect Diagnostic Information
-
-```bash
-# Run on EC2 instance
-cat > /tmp/diagnostic-info.txt << 'EOF'
-=== openclaw Diagnostic Information ===
-Date: $(date)
-Region: $(curl -s http://169.254.169.254/latest/meta-data/placement/region)
-Instance ID: $(curl -s http://169.254.169.254/latest/meta-data/instance-id)
-
-=== openclaw Version ===
-$(clawdbot --version)
-
-=== Service Status ===
-$(XDG_RUNTIME_DIR=/run/user/1000 systemctl --user status clawdbot-gateway --no-pager)
-
-=== Configuration ===
-$(cat ~/.clawdbot/clawdbot.json | python3 -m json.tool)
-
-=== Recent Logs ===
-$(XDG_RUNTIME_DIR=/run/user/1000 journalctl --user -u clawdbot-gateway -n 50 --no-pager)
-
-=== Bedrock Models ===
-$(aws bedrock list-foundation-models --by-provider Amazon --region $(curl -s http://169.254.169.254/latest/meta-data/placement/region) --output table)
-EOF
-
-cat /tmp/diagnostic-info.txt
-```
-
-### Support Resources
-
-- **openclaw Issues**: https://github.com/openclaw/openclaw/issues
-- **openclaw Discord**: https://discord.gg/openclaw
-- **AWS Bedrock**: https://repost.aws/tags/bedrock
-- **This Project**: https://github.com/aws-samples/sample-openclaw-on-AWS-with-Bedrock/issues
-
-## Reference
-
-### Useful File Locations
+## File Locations
 
 ```
-/home/ubuntu/.clawdbot/clawdbot.json          # Main configuration
-# Gateway token: stored in SSM Parameter Store (not on disk)
-/home/ubuntu/.clawdbot/setup_status.txt       # Setup completion status
-/var/log/clawdbot-setup.log                   # Installation log
-/tmp/clawdbot/clawdbot-YYYY-MM-DD.log        # Daily logs
+~/.openclaw/openclaw.json          # Main config
+~/.openclaw/.env                   # Environment variables (AWS_PROFILE etc.)
+/var/log/openclaw-setup.log        # EC2 setup log
 ```
 
-### Environment Variables
+Gateway token is stored in SSM Parameter Store at `/openclaw/<stack-name>/gateway-token` — never written to disk.
 
-```bash
-export AWS_REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
-export XDG_RUNTIME_DIR=/run/user/1000
-```
+---
 
-### Quick Commands Reference
+## Support
 
-```bash
-# Status
-clawdbot status
-
-# Logs
-clawdbot logs -f
-
-# Restart
-XDG_RUNTIME_DIR=/run/user/1000 systemctl --user restart clawdbot-gateway
-
-# Config
-cat ~/.clawdbot/clawdbot.json
-
-# Token (from SSM Parameter Store)
-bash ~/ssm-portforward.sh
-
-# Test Bedrock
-aws bedrock-runtime invoke-model \
-  --model-id global.amazon.nova-2-lite-v1:0 \
-  --body '{"messages":[{"role":"user","content":[{"text":"test"}]}],"inferenceConfig":{"maxTokens":10}}' \
-  --region $(curl -s http://169.254.169.254/latest/meta-data/placement/region) \
-  /tmp/test.json
-```
-
-For deployment instructions, see [DEPLOYMENT.md](DEPLOYMENT.md).
-For security best practices, see [SECURITY.md](SECURITY.md).
+- [GitHub Issues](https://github.com/aws-samples/sample-OpenClaw-on-AWS-with-Bedrock/issues)
+- [OpenClaw Discord](https://discord.gg/openclaw)
+- [AWS Bedrock re:Post](https://repost.aws/tags/bedrock)

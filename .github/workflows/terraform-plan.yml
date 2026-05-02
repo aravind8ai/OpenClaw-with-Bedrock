@@ -8,10 +8,16 @@ on:
       - '.github/workflows/terraform-plan.yml'
       - '.github/workflows/terraform-apply.yml'
 
+env:
+  TF_VERSION: "1.9.0"
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  STACK_NAME: ${{ vars.STACK_NAME || 'chatbot-stack' }}
+  TF_WORKING_DIR: terraform
+
 permissions:
   contents: read
-  pull-requests: write  # to post plan output as a PR comment
-  id-token: write       # for OIDC auth with AWS
+  pull-requests: write
+  id-token: write
 
 concurrency:
   group: terraform-${{ github.ref }}
@@ -23,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: terraform
+        working-directory: ${{ env.TF_WORKING_DIR }}
 
     steps:
       - uses: actions/checkout@v4
@@ -32,12 +38,12 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION || 'us-west-2' }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: "~1.5"
+          terraform_version: ${{ env.TF_VERSION }}
 
       - name: Terraform Format Check
         id: fmt
@@ -49,8 +55,9 @@ jobs:
         run: |
           terraform init \
             -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
-            -backend-config="key=openclaw/terraform.tfstate" \
-            -backend-config="region=${{ vars.AWS_REGION || 'us-west-2' }}" \
+            -backend-config="key=${{ env.STACK_NAME }}/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}" \
             -input=false
 
       - name: Terraform Validate
@@ -61,8 +68,8 @@ jobs:
         id: plan
         run: |
           terraform plan \
-            -var="aws_region=${{ vars.AWS_REGION || 'us-west-2' }}" \
-            -var="stack_name=${{ vars.STACK_NAME || 'openclaw-bedrock' }}" \
+            -var="aws_region=${{ env.AWS_REGION }}" \
+            -var="stack_name=${{ env.STACK_NAME }}" \
             -var="openclaw_model=${{ vars.OPENCLAW_MODEL || 'global.amazon.nova-2-lite-v1:0' }}" \
             -var="instance_type=${{ vars.INSTANCE_TYPE || 'c7g.large' }}" \
             -var="create_vpc_endpoints=${{ vars.CREATE_VPC_ENDPOINTS || 'true' }}" \
@@ -106,10 +113,9 @@ jobs:
               '```',
               '</details>',
               '',
-              `*Triggered by @${{ github.actor }} on \`${{ github.ref_name }}\`*`,
+              `*Pushed by: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`,
             ].join('\n');
 
-            // Delete previous plan comments to keep the PR clean
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
